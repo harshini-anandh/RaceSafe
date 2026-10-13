@@ -40,6 +40,25 @@ def test_safe_path_never_overbooks_same_burst(system):
     assert consistency(system)["all_passed"]
 
 
+def test_fairqueue_experiment_with_a_single_course(system):
+    config = {"mode": "BOTH", "total_requests": 60, "course_count": 1, "distribution": "skewed",
+              "hot_share": 0.7, "weights": None, "capacity": 10, "work_ms": 1, "repeats": 1, "seed": 5}
+    group = system.experiments.start(config)
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        state = system.experiments.get_group(group["group_id"])
+        if state["status"] != "RUNNING":
+            break
+        time.sleep(0.3)
+    assert state["status"] == "COMPLETED", state.get("error")
+    for run in state["runs"]:
+        s = run["summary"]
+        assert s["completed"] == 60
+        assert [(c["course_id"], c["confirmed"], c["waitlisted"]) for c in s["per_course"]] == [("XP-1", 10, 50)]
+        assert s["fairness"]["jain_index"] is None
+    assert set(state["comparison"]["by_mode"]) == {"GLOBAL_FIFO", "FAIR_QUEUE"}
+
+
 def test_fairqueue_experiment_runs_both_modes_on_same_workload(system):
     config = {"mode": "BOTH", "total_requests": 120, "course_count": 4, "distribution": "skewed",
               "hot_share": 0.7, "weights": None, "capacity": 20, "work_ms": 2, "repeats": 1, "seed": 1}

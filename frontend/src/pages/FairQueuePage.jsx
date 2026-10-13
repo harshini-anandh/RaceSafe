@@ -1,16 +1,15 @@
-import { BarChart3, FlaskConical, History, Play, Scale, Table2, Timer } from 'lucide-react';
+import { BarChart3, ListOrdered, Play, Scale, SlidersHorizontal, Table2, Timer } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
-import {
-  Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis,
-} from 'recharts';
+import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import ChartTooltip from '../components/ChartTooltip';
 import {
-  Alert, Button, Card, EmptyState, ErrorState, Field, LoadingState, PageHeader, ProgressBar, Segmented, StatusBadge,
+  Alert, Button, Disclosure, Empty, Field, Loading, PageHeader, Panel, Progress, QueryView, Segmented, StatusBadge,
 } from '../components/ui';
-import { useHealth } from '../hooks/HealthContext';
+import { useConnection } from '../hooks/ConnectionContext';
+import { useToast } from '../hooks/Toasts';
 import { usePolling } from '../hooks/usePolling';
 import { api } from '../services/api';
-import { fmtDateTime, fmtMs, fmtNum, MODE_LABEL } from '../utils/format';
+import { fmtDateTime, fmtMs, fmtNum, MODE_LABEL, shortId } from '../utils/format';
 import { CHART, MODE_COLOR } from '../utils/theme';
 
 const MODES = ['GLOBAL_FIFO', 'FAIR_QUEUE'];
@@ -24,26 +23,30 @@ const mean = (xs) => {
   return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
 };
 
+/** Relative change, worded from the measured numbers only. */
 function changeText(before, after, lowerIsBetter = true) {
   if (before == null || after == null || before === 0) return '—';
   const p = ((after - before) / before) * 100;
+  if (Math.abs(p) < 2) return `${p > 0 ? '+' : ''}${p.toFixed(1)}% (about the same)`;
   const better = lowerIsBetter ? p < 0 : p > 0;
-  return `${p > 0 ? '+' : ''}${p.toFixed(1)}% ${Math.abs(p) < 2 ? '(about the same)' : better ? '(better)' : '(worse)'}`;
+  return `${p > 0 ? '+' : ''}${p.toFixed(1)}% (${better ? 'better' : 'worse'})`;
 }
 
 export default function FairQueuePage() {
-  const { health } = useHealth();
+  const { demoMode } = useConnection();
+  const toast = useToast();
   const [config, setConfig] = useState(DEFAULT_CONFIG);
   const [groupId, setGroupId] = useState(null);
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState(null);
   const [historyKey, setHistoryKey] = useState(0);
+  const [pollFast, setPollFast] = useState(false);
 
   const history = usePolling(() => api.experiments(), 0, [historyKey]);
-  const [pollFast, setPollFast] = useState(false);
   const group = usePolling(() => (groupId ? api.experiment(groupId) : Promise.resolve(null)), pollFast ? 700 : 0, [groupId, pollFast]);
   const g = group.data && group.data.group_id === groupId ? group.data : null;
   const running = g?.status === 'RUNNING';
+  const single = Number(config.course_count) === 1;
 
   useEffect(() => {
     if (g && g.status !== 'RUNNING' && pollFast) {
@@ -62,10 +65,11 @@ export default function FairQueuePage() {
   };
   const setCourseCount = (n) => {
     const count = Number(n);
-    setConfig((c) => ({ ...c, course_count: count, weights: Array.from({ length: count }, (_, i) => c.weights[i] ?? 1) }));
+    setConfig((c) => ({ ...c, course_count: count, weights: Array.from({ length: Math.max(count, 0) }, (_, i) => c.weights[i] ?? 1) }));
   };
 
   async function run() {
+    if (starting || running) return;
     setStarting(true);
     setStartError(null);
     try {
@@ -79,6 +83,9 @@ export default function FairQueuePage() {
       const started = await api.startExperiment(body);
       setGroupId(started.group_id);
       setPollFast(true);
+      if (window.innerWidth < 1180) {
+        setTimeout(() => document.getElementById('fq-run')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 300);
+      }
     } catch (e) {
       setStartError(e);
     } finally {
@@ -89,99 +96,103 @@ export default function FairQueuePage() {
   return (
     <>
       <PageHeader
-        title="FairQueue vs Global FIFO"
-        description="Runs the same burst of requests (same students, same shuffled arrival order) through both schedulers and measures waiting time, completion time, throughput and fairness from the committed rows in MySQL."
-      />
-      <div className="grid grid-sidebar-left">
-        <div className="stack" style={{ gap: 16 }}>
-          <Card title="Experiment setup" icon={FlaskConical}>
-            <div className="stack">
-              <Field label="Scheduler">
-                <Segmented value={config.mode} onChange={set('mode')} options={[
-                  { value: 'BOTH', label: 'Compare both' }, { value: 'GLOBAL_FIFO', label: 'Global FIFO' },
-                  { value: 'FAIR_QUEUE', label: 'FairQueue' }]} />
-              </Field>
-              <div className="grid grid-2" style={{ gap: 12 }}>
-                <Field label="Requests"><input className="input" type="number" min={20} max={2000} value={config.total_requests} onChange={set('total_requests')} /></Field>
-                <Field label="Courses"><input className="input" type="number" min={2} max={8} value={config.course_count} onChange={(e) => setCourseCount(e.target.value)} /></Field>
-                <Field label="Seats per course"><input className="input" type="number" min={1} max={600} value={config.capacity} onChange={set('capacity')} /></Field>
-                <Field label="Repeats per mode"><input className="input" type="number" min={1} max={5} value={config.repeats} onChange={set('repeats')} /></Field>
-              </div>
-              <Field label="Course demand">
-                <Segmented value={config.distribution} onChange={set('distribution')} options={[
-                  { value: 'skewed', label: 'Skewed (one hot)' }, { value: 'uniform', label: 'Uniform' }, { value: 'custom', label: 'Custom' }]} />
-              </Field>
-              {config.distribution === 'skewed' && (
-                <Field label="Share of requests for the hot course" value={`${Math.round(config.hot_share * 100)}%`}>
-                  <input type="range" min={0.2} max={0.95} step={0.05} value={config.hot_share} onChange={set('hot_share')} />
-                </Field>
-              )}
-              {config.distribution === 'custom' && (
-                <Field label="Relative weight per course" hint="XP-1 … XP-n, e.g. 5,1,1,1,1">
-                  <div className="row" style={{ gap: 6 }}>
-                    {config.weights.map((w, i) => (
-                      <input key={i} className="input" type="number" min={0.1} step={0.5} value={w} style={{ width: 62 }}
-                        onChange={(e) => setConfig((c) => ({ ...c, weights: c.weights.map((x, j) => (j === i ? e.target.value : x)) }))} />
-                    ))}
+        description="Run the same burst of requests through Global FIFO and FairQueue, then compare what MySQL recorded." />
+
+      <div className="grid split-left">
+        <div className="sticky-col">
+          <Panel icon={SlidersHorizontal} title="Configuration" description="Workload, scheduler and execution">
+            <div className="stack-lg">
+              <fieldset>
+                <legend className="fieldset-title">Workload</legend>
+                <div className="stack">
+                  <div className="grid cols-3" style={{ gap: 8 }}>
+                    <Field label="Requests" htmlFor="fq-req"><input id="fq-req" className="input" type="number" min={20} max={2000} value={config.total_requests} onChange={set('total_requests')} /></Field>
+                    <Field label="Courses" htmlFor="fq-courses"><input id="fq-courses" className="input" type="number" min={1} max={8} value={config.course_count} onChange={(e) => setCourseCount(e.target.value)} /></Field>
+                    <Field label="Seats each" htmlFor="fq-cap"><input id="fq-cap" className="input" type="number" min={1} max={600} value={config.capacity} onChange={set('capacity')} /></Field>
                   </div>
-                </Field>
-              )}
-              <div className="grid grid-2" style={{ gap: 12 }}>
-                <Field label="Simulated work (ms)" hint="sleep inside each transaction">
-                  <input className="input" type="number" min={0} max={100} value={config.work_ms} onChange={set('work_ms')} />
-                </Field>
-                <Field label="Random seed" hint="same seed = same workload">
-                  <input className="input" type="number" min={0} value={config.seed} onChange={set('seed')} />
-                </Field>
-              </div>
-              <Button icon={Play} loading={starting || running} disabled={!health?.demo_mode} onClick={run}>
+                  {!single && (
+                    <Field label="Demand across courses">
+                      <Segmented block label="Demand" value={config.distribution} onChange={set('distribution')} options={[
+                        { value: 'skewed', label: 'Hot course' }, { value: 'uniform', label: 'Uniform' }, { value: 'custom', label: 'Custom' }]} />
+                    </Field>
+                  )}
+                  {single && (
+                    <div className="small muted">One course: every request goes to XP-1 (up to 600, one per student). There is no cross-course comparison and Jain's index is not defined.</div>
+                  )}
+                  {!single && config.distribution === 'skewed' && (
+                    <Field label="Hot course share" value={`${Math.round(config.hot_share * 100)}%`} htmlFor="fq-hot">
+                      <input id="fq-hot" type="range" min={0.2} max={0.95} step={0.05} value={config.hot_share} onChange={set('hot_share')} />
+                    </Field>
+                  )}
+                  {!single && config.distribution === 'custom' && (
+                    <Field label="Relative weight per course" hint="XP-1 … XP-n">
+                      <div className="row" style={{ gap: 6 }}>
+                        {config.weights.map((w, i) => (
+                          <input key={i} aria-label={`Weight XP-${i + 1}`} className="input" type="number" min={0.1} step={0.5} value={w} style={{ width: 64 }}
+                            onChange={(e) => setConfig((c) => ({ ...c, weights: c.weights.map((x, j) => (j === i ? e.target.value : x)) }))} />
+                        ))}
+                      </div>
+                    </Field>
+                  )}
+                </div>
+              </fieldset>
+
+              <fieldset>
+                <legend className="fieldset-title">Scheduler</legend>
+                <Segmented block label="Scheduler" value={config.mode} onChange={set('mode')} options={[
+                  { value: 'BOTH', label: 'Both' }, { value: 'GLOBAL_FIFO', label: 'Global FIFO' },
+                  { value: 'FAIR_QUEUE', label: 'FairQueue' }]} />
+                <div className="field-hint" style={{ marginTop: 6 }}>“Both” runs the identical workload once per scheduler and compares them.</div>
+              </fieldset>
+
+              <fieldset>
+                <legend className="fieldset-title">Execution</legend>
+                <div className="grid cols-3" style={{ gap: 8 }}>
+                  <Field label="Work (ms)" htmlFor="fq-work"><input id="fq-work" className="input" type="number" min={0} max={100} value={config.work_ms} onChange={set('work_ms')} /></Field>
+                  <Field label="Repeats" htmlFor="fq-rep"><input id="fq-rep" className="input" type="number" min={1} max={5} value={config.repeats} onChange={set('repeats')} /></Field>
+                  <Field label="Seed" htmlFor="fq-seed"><input id="fq-seed" className="input" type="number" min={0} value={config.seed} onChange={set('seed')} /></Field>
+                </div>
+                <div className="field-hint" style={{ marginTop: 6 }}>
+                  Work is a sleep inside each transaction (holding the course lock). Same seed = same students and arrival order.
+                </div>
+              </fieldset>
+
+              <Button variant="primary" icon={Play} loading={starting || running} disabled={!demoMode} onClick={run}>
                 {running ? 'Running…' : 'Run experiment'}
               </Button>
-              {!health?.demo_mode && <div className="small muted">Experiments need RACESAFE_ENV=development.</div>}
-              {startError && <Alert tone="critical">{startError.message}</Alert>}
+              {!demoMode && <div className="small muted">Experiments require RACESAFE_ENV=development.</div>}
+              {startError && <Alert tone="danger">{startError.message}</Alert>}
             </div>
-          </Card>
-
-          <Card title="Previous runs" icon={History} flush>
-            {history.error && !history.data && <div style={{ padding: '0 18px 14px' }}><ErrorState error={history.error} /></div>}
-            {!history.data && !history.error && <LoadingState />}
-            {history.data && history.data.groups.length === 0 && <EmptyState title="No experiments yet" />}
-            {history.data && history.data.groups.length > 0 && (
-              <div className="list-scroll" style={{ maxHeight: 260 }}>
-                <table className="table">
-                  <tbody>
-                    {history.data.groups.map((h) => (
-                      <tr key={h.group_id} className={`clickable ${h.group_id === groupId ? 'selected' : ''}`}
-                        onClick={() => { setGroupId(h.group_id); setPollFast(false); }}>
-                        <td className="small">{fmtDateTime(h.created_at)}</td>
-                        <td className="small">{h.modes.map((m) => MODE_LABEL[m] || m).join(' vs ')}</td>
-                        <td className="small num">{h.runs} run{h.runs > 1 ? 's' : ''}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </Card>
+          </Panel>
         </div>
 
-        <div className="stack" style={{ gap: 16 }}>
-          {!groupId && (
-            <Card><EmptyState icon={Scale} title="No experiment selected">Configure a workload and press “Run experiment”.</EmptyState></Card>
+        <div className="stack-lg">
+          {!groupId && <Panel><Empty icon={Scale} title="No experiment yet">Choose a workload on the left and press Run experiment.</Empty></Panel>}
+          {groupId && !g && (group.error ? <QueryView query={group}>{() => null}</QueryView> : <Panel><Loading rows={4} /></Panel>)}
+          {g && (
+            <Results g={g} history={history.data?.groups || []} onSelect={(id) => { setGroupId(id); setPollFast(false); }}
+              onUseSettings={(c) => {
+                setConfig((cur) => ({
+                  ...cur, mode: c.mode ?? cur.mode, total_requests: c.total_requests ?? cur.total_requests,
+                  course_count: c.course_count ?? cur.course_count, distribution: c.distribution ?? cur.distribution,
+                  hot_share: c.hot_share ?? cur.hot_share, capacity: c.capacity ?? cur.capacity, work_ms: c.work_ms ?? cur.work_ms,
+                  repeats: c.repeats ?? cur.repeats, seed: c.seed ?? cur.seed,
+                  weights: c.weights || Array.from({ length: c.course_count || cur.course_count }, (_, k) => cur.weights[k] ?? 1),
+                }));
+                toast({ tone: 'info', title: 'Settings loaded', text: 'The configuration now matches this run. Press Run experiment to repeat it.' });
+              }} />
           )}
-          {groupId && group.error && !g && <ErrorState error={group.error} onRetry={group.refresh} />}
-          {groupId && !g && !group.error && <Card><LoadingState label="Loading experiment…" /></Card>}
-          {g && <ExperimentResults g={g} />}
         </div>
       </div>
     </>
   );
 }
 
-function ExperimentResults({ g }) {
+function Results({ g, history, onSelect, onUseSettings }) {
   const cmp = g.comparison?.by_mode || {};
   const modes = MODES.filter((m) => cmp[m]);
   const courses = g.courses || g.config?.courses || [];
+  const both = modes.length === 2;
 
   const rows = useMemo(() => {
     if (!modes.length) return [];
@@ -189,12 +200,10 @@ function ExperimentResults({ g }) {
       const row = { course: c.course_id, label: c.label, requests: c.requests };
       modes.forEach((m) => {
         const pc = cmp[m].per_course.find((x) => x.course_id === c.course_id) || {};
-        row[`${m}_avg`] = pc.avg_wait_ms;
-        row[`${m}_max`] = pc.max_wait_ms;
-        row[`${m}_turn`] = pc.avg_turnaround_ms;
-        row[`${m}_conf`] = pc.confirmed;
-        row[`${m}_wait`] = pc.waitlisted;
-        row[`${m}_fail`] = pc.failed;
+        Object.assign(row, {
+          [`${m}_avg`]: pc.avg_wait_ms, [`${m}_max`]: pc.max_wait_ms, [`${m}_turn`]: pc.avg_turnaround_ms,
+          [`${m}_conf`]: pc.confirmed, [`${m}_wait`]: pc.waitlisted, [`${m}_fail`]: pc.failed,
+        });
       });
       return row;
     });
@@ -203,46 +212,77 @@ function ExperimentResults({ g }) {
   const quietAvg = (m) => mean(rows.filter((r) => r.label !== 'hot').map((r) => r[`${m}_avg`]));
   const hotAvg = (m) => mean(rows.filter((r) => r.label === 'hot').map((r) => r[`${m}_avg`]));
   const hasHot = rows.some((r) => r.label === 'hot');
-  const both = modes.length === 2;
+  const started = g.started_at || g.runs?.[0]?.created_at;
 
   return (
     <>
-      <Card title="Run status" icon={Timer}
-        actions={<StatusBadge status={g.status === 'RUNNING' ? 'PENDING' : g.status === 'COMPLETED' ? 'COMPLETED' : 'FAILED'}
-          label={g.status === 'RUNNING' ? 'Running' : g.status === 'COMPLETED' ? 'Completed' : g.status} />}>
-        <div className="stack">
-          <div className="small text-2">
-            {g.config?.total_requests} requests · {courses.length} courses ({courses.map((c) => `${c.course_id}: ${c.requests}`).join(', ')}) ·
-            {' '}{g.config?.capacity} seats each · {g.config?.work_ms} ms simulated work · seed {g.config?.seed}
-          </div>
-          {g.status === 'RUNNING' && (
-            <>
-              <div className="row-between small">
-                <span>Run {Math.min((g.runs_done || 0) + 1, g.runs_total)} of {g.runs_total}: <b>{MODE_LABEL[g.current_mode] || '…'}</b></span>
-                <span className="mono">{g.current_done}/{g.current_total}</span>
-              </div>
-              <ProgressBar value={(g.runs_done || 0) * (g.current_total || 1) + (g.current_done || 0)}
-                max={(g.runs_total || 1) * (g.current_total || 1)} />
-            </>
-          )}
-          {g.error && <Alert tone="critical" title="Experiment failed">{g.error}</Alert>}
+      <Panel
+        id="fq-run"
+        icon={Timer}
+        title={<span className="row" style={{ gap: 10 }}>Run {shortId(g.group_id)}
+          <StatusBadge status={g.status === 'RUNNING' ? 'RUNNING' : g.status === 'COMPLETED' ? 'COMPLETED' : 'FAILED'}
+            label={g.status === 'RUNNING' ? 'Running' : g.status === 'COMPLETED' ? 'Completed' : g.status} /></span>}
+        description={`Started ${fmtDateTime(started)}`}
+        actions={
+          <>
+            <label htmlFor="fq-history" className="sr-only">Show a previous run</label>
+            <select id="fq-history" className="select" style={{ width: 'auto', maxWidth: 280, height: 32 }} value={g.group_id}
+              onChange={(e) => onSelect(e.target.value)}>
+              {!history.some((h) => h.group_id === g.group_id) && <option value={g.group_id}>Current run</option>}
+              {history.map((h) => (
+                <option key={h.group_id} value={h.group_id}>
+                  {fmtDateTime(h.created_at)} · {h.modes.map((m) => MODE_LABEL[m] || m).join(' vs ')}{h.failed ? ' · failed' : ''}
+                </option>
+              ))}
+            </select>
+            {g.status !== 'RUNNING' && g.config && (
+              <Button size="sm" onClick={() => onUseSettings(g.config)} title="Copy this run's settings into the configuration">Use these settings</Button>
+            )}
+          </>
+        }>
+        <div className="facts" style={{ marginBottom: g.status === 'RUNNING' || g.error ? 12 : 0 }}>
+          <span className="fact"><b>{g.config?.total_requests}</b> requests</span>
+          <span className="fact">
+            <b>{courses.length}</b> course{courses.length === 1 ? '' : 's'}
+            {courses.length > 0 && <>&nbsp;· {courses.map((c) => `${c.course_id} ${c.requests}`).join(' / ')}</>}
+          </span>
+          <span className="fact"><b>{g.config?.capacity}</b> seats each</span>
+          <span className="fact"><b>{g.config?.work_ms}</b> ms work</span>
+          <span className="fact">{g.config?.repeats > 1 ? <><b>{g.config.repeats}</b> repeats · </> : null}seed <b>{g.config?.seed}</b></span>
         </div>
-      </Card>
+        {g.status === 'RUNNING' && (
+          <div className="stack" style={{ gap: 6 }}>
+            <div className="row-between small">
+              <span>Run {Math.min((g.runs_done || 0) + 1, g.runs_total)} of {g.runs_total}: <b>{MODE_LABEL[g.current_mode] || '…'}</b></span>
+              <span className="mono">{g.current_done}/{g.current_total} requests</span>
+            </div>
+            <Progress value={(g.runs_done || 0) * (g.current_total || 1) + (g.current_done || 0)} max={(g.runs_total || 1) * (g.current_total || 1)} />
+          </div>
+        )}
+        {g.error && <Alert tone="danger" title="Experiment failed">{g.error}</Alert>}
+      </Panel>
 
       {modes.length > 0 && (
         <>
+          {rows.length === 1 && both && (
+            <Alert tone="info" title="Single course: nothing to share">
+              FairQueue keeps one request of the course in progress, so other workers stay idle; Global FIFO lets every
+              worker do the work outside the row lock in parallel. FIFO can therefore finish sooner here. Seat results are
+              identical; Jain's index needs at least two courses.
+            </Alert>
+          )}
           {both && hasHot && (
-            <Alert tone="info" title="What the measurements say">
-              Average wait of the non-hot courses: <b>{fmtMs(quietAvg('GLOBAL_FIFO'))}</b> with Global FIFO vs{' '}
-              <b>{fmtMs(quietAvg('FAIR_QUEUE'))}</b> with FairQueue ({changeText(quietAvg('GLOBAL_FIFO'), quietAvg('FAIR_QUEUE'))}).
-              Hot course: {fmtMs(hotAvg('GLOBAL_FIFO'))} vs {fmtMs(hotAvg('FAIR_QUEUE'))}. Total completion time:{' '}
+            <Alert tone="info" title="What was measured">
+              Non-hot courses waited <b>{fmtMs(quietAvg('GLOBAL_FIFO'))}</b> on average with Global FIFO and{' '}
+              <b>{fmtMs(quietAvg('FAIR_QUEUE'))}</b> with FairQueue: {changeText(quietAvg('GLOBAL_FIFO'), quietAvg('FAIR_QUEUE'))}.
+              Hot course: {fmtMs(hotAvg('GLOBAL_FIFO'))} vs {fmtMs(hotAvg('FAIR_QUEUE'))}. Total time{' '}
               {fmtMs(cmp.GLOBAL_FIFO.completion_time_ms)} vs {fmtMs(cmp.FAIR_QUEUE.completion_time_ms)}. The hot course
-              shares one row lock, so FairQueue cannot make it faster — it stops it from blocking everyone else.
+              shares one row lock, so FairQueue cannot make it faster; it stops it from occupying every worker.
             </Alert>
           )}
 
-          <Card title="Summary" icon={Table2} subtitle={`Averaged over ${cmp[modes[0]].runs} run(s) per mode`} flush>
-            <div className="table-wrap">
+          <Panel icon={Table2} title="Comparison" description={`Mean of ${cmp[modes[0]].runs} run(s) per mode`} flush>
+            <div className="table-scroll">
               <table className="table">
                 <thead>
                   <tr>
@@ -254,19 +294,21 @@ function ExperimentResults({ g }) {
                 <tbody>
                   {[
                     ['Total completion time', 'completion_time_ms', fmtMs, true],
-                    ['Throughput (req/s)', 'throughput_rps', (v) => fmtNum(v, 1), false],
-                    ['Average wait (all requests)', 'avg_wait_ms', fmtMs, true],
+                    ['Throughput (requests/s)', 'throughput_rps', (v) => fmtNum(v, 1), false],
+                    ['Average wait', 'avg_wait_ms', fmtMs, true],
                     ['Maximum wait', 'max_wait_ms', fmtMs, true],
                     ["Jain's fairness index", 'jain_index', (v) => fmtNum(v, 3), false],
                     ['Peak courses in flight', 'peak_courses_in_flight', (v) => fmtNum(v, 1), null],
-                    ['Confirmed', 'confirmed', (v) => fmtNum(v), null],
-                    ['Waitlisted', 'waitlisted', (v) => fmtNum(v), null],
-                    ['Failed requests', 'failed', (v) => fmtNum(v), null],
+                    ['Confirmed / waitlisted / failed', null, null, null],
                   ].map(([label, key, fmt, lower]) => (
-                    <tr key={key}>
+                    <tr key={label}>
                       <td>{label}</td>
-                      {modes.map((m) => <td key={m} className="num">{fmt(cmp[m][key])}</td>)}
-                      {both && <td className="num small text-2">{lower === null ? '' : changeText(cmp.GLOBAL_FIFO[key], cmp.FAIR_QUEUE[key], lower)}</td>}
+                      {modes.map((m) => (
+                        <td key={m} className="num">
+                          {key ? fmt(cmp[m][key]) : `${fmtNum(cmp[m].confirmed)} / ${fmtNum(cmp[m].waitlisted)} / ${fmtNum(cmp[m].failed)}`}
+                        </td>
+                      ))}
+                      {both && <td className="num small text-2">{key && lower !== null ? changeText(cmp.GLOBAL_FIFO[key], cmp.FAIR_QUEUE[key], lower) : ''}</td>}
                     </tr>
                   ))}
                   {hasHot && (
@@ -279,15 +321,18 @@ function ExperimentResults({ g }) {
                 </tbody>
               </table>
             </div>
-          </Card>
+          </Panel>
 
-          <div className="grid grid-2">
-            <WaitChart title="Average wait per course" rows={rows} modes={modes} suffix="_avg" />
-            <WaitChart title="Maximum wait per course" rows={rows} modes={modes} suffix="_max" />
-          </div>
+          <Panel icon={BarChart3} title="Waiting time per course" description="Wait = dispatch time − burst release time. Lower is better."
+            actions={<div className="legend">{modes.map((m) => <span key={m}><i style={{ background: MODE_COLOR[m] }} />{MODE_LABEL[m]}</span>)}</div>}>
+            <div className="grid cols-2">
+              <WaitChart title="Average" rows={rows} modes={modes} suffix="_avg" />
+              <WaitChart title="Maximum" rows={rows} modes={modes} suffix="_max" />
+            </div>
+          </Panel>
 
-          <Card title="Per-course results" icon={BarChart3} subtitle="Wait = dispatch time − release time; turnaround = commit time − release time" flush>
-            <div className="table-wrap">
+          <Panel icon={ListOrdered} title="Per-course results" flush>
+            <div className="table-scroll">
               <table className="table">
                 <thead>
                   <tr>
@@ -301,7 +346,7 @@ function ExperimentResults({ g }) {
                 <tbody>
                   {rows.map((r) => (
                     <tr key={r.course}>
-                      <td><b>{r.course}</b> {r.label === 'hot' && <span className="badge serious">hot</span>}</td>
+                      <td><b>{r.course}</b>{r.label === 'hot' && <span className="sub">hot course</span>}</td>
                       <td className="num">{r.requests}</td>
                       {modes.map((m) => <td key={`a${m}`} className="num">{fmtMs(r[`${m}_avg`])}</td>)}
                       {modes.map((m) => <td key={`x${m}`} className="num">{fmtMs(r[`${m}_max`])}</td>)}
@@ -312,14 +357,16 @@ function ExperimentResults({ g }) {
                 </tbody>
               </table>
             </div>
-          </Card>
-
-          <Alert tone="info" title="How fairness is measured">
-            Jain's index J = (Σx)² / (n·Σx²) over x = the number of requests each course got dispatched while
-            <i> every</i> course still had requests waiting (the contention window). J = 1 means every backlogged course got
-            an equal share of the workers; J = 1/n means one course took them all. Timings come from MySQL timestamps of
-            this run only; repeat runs (or a different seed) to see the noise on a single laptop.
-          </Alert>
+            <Disclosure summary="How waits and fairness are measured">
+              <p className="small text-2" style={{ maxWidth: 760 }}>
+                All requests are persisted while dispatch is paused, then released at one instant. Wait is dispatch time minus
+                that release time; turnaround is commit time minus release time. Jain's index J = (Σx)² / (n·Σx²) uses the number of
+                requests each course had dispatched while every course still had requests waiting: 1 means equal service, 1/n
+                means one course took every worker. Timings come from MySQL timestamps of this run only; repeat runs or change the
+                seed to see the run-to-run noise.
+              </p>
+            </Disclosure>
+          </Panel>
         </>
       )}
     </>
@@ -328,25 +375,22 @@ function ExperimentResults({ g }) {
 
 function WaitChart({ title, rows, modes, suffix }) {
   return (
-    <Card title={title} icon={BarChart3} subtitle="Lower is better · hover a bar for values">
-      <div className="legend" style={{ marginBottom: 8 }}>
-        {modes.map((m) => <span key={m}><i style={{ background: MODE_COLOR[m] }} />{MODE_LABEL[m]}</span>)}
-      </div>
-      <ResponsiveContainer width="100%" height={260}>
-        <BarChart data={rows} margin={{ top: 4, right: 8, left: 4, bottom: 0 }} barGap={2} barCategoryGap="28%">
+    <figure style={{ margin: 0 }}>
+      <figcaption className="small text-2" style={{ marginBottom: 4 }}>{title}</figcaption>
+      <ResponsiveContainer width="100%" height={230}>
+        <BarChart data={rows} margin={{ top: 8, right: 4, left: 0, bottom: 0 }} barGap={3} barCategoryGap="30%">
           <CartesianGrid vertical={false} stroke={CHART.grid} />
-          <XAxis dataKey="course" tick={{ fill: CHART.tick, fontSize: 12 }} axisLine={{ stroke: CHART.axis }} tickLine={false}
-            tickFormatter={(v) => { const r = rows.find((x) => x.course === v); return r?.label === 'hot' ? `${v} (hot)` : v; }} />
-          <YAxis tick={{ fill: CHART.tick, fontSize: 11 }} axisLine={false} tickLine={false} width={58}
+          <XAxis dataKey="course" tick={{ fill: CHART.tick, fontSize: 12 }} axisLine={false} tickLine={false}
+            tickFormatter={(v) => (rows.find((x) => x.course === v)?.label === 'hot' ? `${v} (hot)` : v)} />
+          <YAxis tick={{ fill: CHART.tick, fontSize: 11 }} axisLine={false} tickLine={false} width={52}
             tickFormatter={(v) => (v >= 1000 ? `${(v / 1000).toFixed(1)}s` : `${Math.round(v)}ms`)} />
           <Tooltip cursor={{ fill: CHART.cursor }} content={<ChartTooltip valueFormatter={(v) => fmtMs(v)} />} />
-          <Legend wrapperStyle={{ display: 'none' }} />
           {modes.map((m) => (
-            <Bar key={m} dataKey={`${m}${suffix}`} name={MODE_LABEL[m]} fill={MODE_COLOR[m]} radius={[4, 4, 0, 0]}
-              maxBarSize={30} isAnimationActive={false} />
+            <Bar key={m} dataKey={`${m}${suffix}`} name={MODE_LABEL[m]} fill={MODE_COLOR[m]} radius={[5, 5, 0, 0]}
+              maxBarSize={28} isAnimationActive={false} />
           ))}
         </BarChart>
       </ResponsiveContainer>
-    </Card>
+    </figure>
   );
 }

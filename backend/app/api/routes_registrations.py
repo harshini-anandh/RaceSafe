@@ -8,11 +8,10 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 from app.api.deps import get_system
-from app.models.enums import EventType
+from app.core.errors import DemoOnlyError
 from app.schemas.api import CancelRequest, CancelResponse, RegistrationCreate, RequestOutcome
 from app.services import queries
 from app.services.cancellation import cancel_registration
-from app.workers.failure_injection import FailureKind
 
 router = APIRouter(tags=["registrations"])
 
@@ -51,10 +50,15 @@ async def submit_registration(
     response: Response,
     wait: bool = Query(True, description="Wait for the final result (up to `timeout` seconds)"),
     timeout: float = Query(30, ge=1, le=300),
+    work_ms: int | None = Query(None, ge=0, le=15000, description=(
+        "DEMO ONLY (manual testing): keep this request's transaction - and the course row lock - open for "
+        "this many milliseconds, to make races and head-of-line blocking visible by hand")),
     system=Depends(get_system),
 ):
+    if work_ms is not None and not system.settings.demo_mode:
+        raise DemoOnlyError("work_ms is available only when RACESAFE_ENV=development")
     intake = await run_in_threadpool(system.intake.submit, body.student_id, body.course_id, body.request_id,
-                                     wait=wait)
+                                     wait=wait, work_ms=work_ms)
     if intake.waiter is not None:
         try:
             await asyncio.wait_for(asyncio.wrap_future(intake.waiter), timeout)
@@ -68,12 +72,7 @@ async def submit_registration(
         response.status_code = 202
         return outcome
 
-    if system.injector.consume(FailureKind.LOST_RESPONSE, intake.request_id):
-        await run_in_threadpool(
-            system.events.log, EventType.RESPONSE_LOST, request_id=intake.request_id,
-            student_id=outcome["student_id"], course_id=outcome["course_id"], attempt=outcome["attempts"],
-            message=f"Result {outcome['outcome']} was committed, but the HTTP response was dropped (demo)",
-        )
+    if await run_in_threadpool(system.response_lost, intake.request_id, outcome):
         return JSONResponse(status_code=504, content={
             "code": "RESPONSE_LOST",
             "request_id": intake.request_id,
@@ -99,5 +98,11 @@ def request_events(request_id: str, system=Depends(get_system)):
 
 @router.post("/registrations/cancel", response_model=CancelResponse,
              summary="Cancel a registration; promotes the first waitlisted student atomically")
-def cancel(body: CancelRequest, system=Depends(get_system)):
-    return cancel_registration(system.engine, body.student_id, body.course_id)
+def cancel(body: CancelRequest,
+           hold_ms: int = Query(0, ge=0, le=15000, description=(
+               "DEMO ONLY (manual testing): after deleting the registration, keep the course row locked this many "
+               "milliseconds before promoting and committing, so a new registration can be sent inside the window")),
+           system=Depends(get_system)):
+    if hold_ms and not system.settings.demo_mode:
+        raise DemoOnlyError("hold_ms is available only when RACESAFE_ENV=development")
+    return cancel_registration(system.engine, body.student_id, body.course_id, hold_ms=hold_ms)

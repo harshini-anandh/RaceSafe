@@ -194,6 +194,29 @@ The full judge script is in [docs/JUDGE_DEMO_CHECKLIST.md](docs/JUDGE_DEMO_CHECK
 | Restart recovery | **Failure Recovery** | Pause workers → submit requests → *Simulate crash + restart*. Or pause, submit, press **Ctrl+C** in the backend terminal and start uvicorn again: the log prints `Restart recovery requeued N pending requests`. |
 | Cancel & promote | **Courses & Waitlists** | CS301 has 5 seats: *Submit requests* with 10 → cancel a confirmed student → waitlist #1 becomes confirmed. |
 
+## 4b. KO-06 live technical challenges (C1–C5)
+
+The five challenges from *KO-06_Ctrl_Alt_Del_OSH001_Five_Challenges.pdf* are runnable from the terminal
+(against the running backend) or with pytest. Each runs on its own experiment course
+(`CH1-A` … `CH5-A`) through the real pipeline and checks every claim against MySQL.
+
+```powershell
+python scripts\run_challenges.py -v        # backend running; all five, with every step and check
+pytest tests\test_challenges.py            # automated version
+```
+
+| Challenge | What is demonstrated | Key evidence |
+|---|---|---|
+| **C1** 500 transactional requests (Easy) | 500 distinct students, capacity 10, 8 workers in Global FIFO so all 8 race for one row lock | 10 CONFIRMED / 490 WAITLISTED rows, `confirmed_count = 10`, waitlist 1..490 in commit order, **0 overlapping critical sections** (lock-acquired → commit timestamps) |
+| **C2** Reply lost + promotion (Medium) | Capacity 3, S1..S5; S1's reply dropped after commit; retry same UUID; cancel S1, S2, S3 | Retry = idempotent replay (1 commit), new UUID → ALREADY_REGISTERED, promotions **S4, S5, none**, counts 3, 3, 2 |
+| **C3** Head-of-line control (Medium) | 100 A (10 ticks) then 1 B (1 tick), capacity 1 each, 8 workers | Deterministic tick model driven by the real scheduler: B waits **930 ticks (FIFO) vs 0 (FairQueue)**; A's turnaround (505) and total time (1000) are **identical** — no universal speedup. Repeated against MySQL (1 tick = 3 ms). Active slots: 8 busy (7 blocked on the lock) vs ≤ 2 |
+| **C4** Fail worker holding course slot (Hard) | Capacity 1; r1 fails, r2 queued: failure after dequeue, before commit, and a **worker-thread crash** (once, and 3× = retry limit) | Dispatch order `r1#1 → r1#2 → r2#1` (requeued at the front before the slot is released), rollback logged, slot/queue empty afterwards, crashed worker replaced (8 live), r2 gets the seat when r1 exhausts 3 attempts |
+| **C5** Cancel vs register race (Hard) | Capacity 1; S1 confirmed, S2 waitlisted; cancel S1 concurrently with new S3 | Both forced interleavings (cancel holds the lock / S3 holds the lock) + 20 barrier-released races: always **S2 confirmed, S3 waitlisted behind** |
+
+New failure kinds for `POST /api/failures/inject`: `AFTER_DEQUEUE`, `WORKER_CRASH` (besides `BEFORE_COMMIT`,
+`LOST_RESPONSE`). A newcomer that finds a free seat while someone is waitlisted now promotes the waitlist head
+first (defence in depth for C5).
+
 ## 5. REST API
 
 All endpoints are under `/api`; full schemas at `/docs`. **Demo-only** endpoints return `403` unless
@@ -215,6 +238,7 @@ All endpoints are under `/api`; full schemas at `/docs`. **Demo-only** endpoints
 | `POST /experiments` · `GET /experiments` · `GET /experiments/{group_id}` | *(demo)* FairQueue vs FIFO experiment, history, results |
 | `POST /race-lab/unsafe` · `POST /race-lab/safe` · `GET /race-lab/history` | *(demo)* Race Condition Lab |
 | `POST /failures/inject` · `GET/DELETE /failures` · `POST /failures/simulate-restart` | *(demo)* Failure injection and crash/restart simulation |
+| `GET /challenges` · `GET /challenges/{id}` · `POST /challenges/{id}` | *(demo)* KO-06 challenges C1–C5: list, last report, run |
 | `POST /admin/reset` · `POST /admin/prepare-course` · `POST /admin/simulate-registrations` | *(demo, localhost)* Reset data, prepare load-test course, quick-fill a course |
 
 ## 6. Database

@@ -1,6 +1,7 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import Layout from './components/Layout';
-import { HealthProvider } from './hooks/HealthContext';
+import { ConnectionProvider } from './hooks/ConnectionContext';
+import { ToastProvider } from './hooks/Toasts';
 import ArchitecturePage from './pages/ArchitecturePage';
 import CoursesPage from './pages/CoursesPage';
 import FairQueuePage from './pages/FairQueuePage';
@@ -11,8 +12,9 @@ import RegisterPage from './pages/RegisterPage';
 
 export default function App() {
   return (
-    <HealthProvider>
-      <BrowserRouter>
+    <ConnectionProvider>
+      <ToastProvider>
+      <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <Routes>
           <Route element={<Layout />}>
             <Route path="/" element={<OverviewPage />} />
@@ -26,6 +28,7 @@ export default function App() {
           </Route>
         </Routes>
       </BrowserRouter>
-    </HealthProvider>
+      </ToastProvider>
+    </ConnectionProvider>
   );
 }

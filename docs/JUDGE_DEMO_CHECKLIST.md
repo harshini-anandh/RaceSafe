@@ -22,6 +22,10 @@
 | 9 | Cancel & promote | *Courses & Waitlists* | CS301 (5 seats): *Submit requests* with 10 → 5 confirmed, 5 waitlisted. Cancel a confirmed student → waitlist #1 promoted in the same transaction; count stays 5/5; activity feed shows `WAITLIST_PROMOTED`. |
 | 10 | Results | *Overview* + Terminal 3 | Final metrics; run `pytest` (show pass count) and `python scripts\load_test.py --scenario capacity` (500 HTTP requests → 10 confirmed, 490 waitlisted). |
 
+**If the organizers assign a KO-06 challenge (C1–C5):** in Terminal 3 run
+`python scripts\run_challenges.py C4 -v` (replace C4 with the assigned challenge). It prints every step and
+each check as expected vs actual; the request IDs it uses can be pasted into the Failure Recovery timeline filter.
+
 **Key sentences for judges**
 - "The database is the final authority: a row lock per course plus UNIQUE and CHECK constraints. The scheduler only decides order."
 - "No global lock — different courses lock different rows and run in parallel."

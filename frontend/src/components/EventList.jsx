@@ -1,16 +1,14 @@
 import { Activity } from 'lucide-react';
 import { fmtTime, shortId } from '../utils/format';
-import { EmptyState, EventBadge, Mono } from './ui';
+import { Empty, EventBadge, Mono } from './ui';
 
 /** Compact event feed (newest first). */
 export default function EventList({ events, emptyText = 'No events yet', showRequest = true }) {
-  if (!events || events.length === 0) {
-    return <EmptyState icon={Activity} title={emptyText} />;
-  }
+  if (!events || events.length === 0) return <Empty icon={Activity} title={emptyText} />;
   return (
-    <div className="events">
+    <ul className="event-list">
       {events.map((e) => (
-        <div className="event" key={e.event_id}>
+        <li className="event-row" key={e.event_id}>
           <span className="event-time">{fmtTime(e.created_at)}</span>
           <span><EventBadge type={e.event_type} /></span>
           <span className="event-msg" title={e.message}>
@@ -20,8 +18,8 @@ export default function EventList({ events, emptyText = 'No events yet', showReq
             {e.worker_name ? ` · ${e.worker_name}` : ''}
             {e.message ? ` — ${e.message}` : ''}
           </span>
-        </div>
+        </li>
       ))}
-    </div>
+    </ul>
   );
 }

@@ -1,14 +1,17 @@
 import { useEffect, useState } from 'react';
 import { api } from '../services/api';
+import { useConnection } from './ConnectionContext';
 
 let cache = null;
 
-/** Loads the sample students once and shares them between pages. */
+/** Loads the sample students once, shares them between pages, and retries after reconnecting. */
 export function useStudents() {
+  const { epoch } = useConnection();
   const [state, setState] = useState({ students: cache || [], loading: !cache, error: null });
   useEffect(() => {
-    if (cache) return;
+    if (cache) return undefined;
     let alive = true;
+    setState((s) => ({ ...s, loading: true }));
     api
       .students(undefined, 1000)
       .then((d) => {
@@ -19,6 +22,6 @@ export function useStudents() {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [epoch]);
   return state;
 }

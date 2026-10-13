@@ -38,6 +38,24 @@ def test_workload_is_deterministic_for_a_seed():
     assert c1[0]["label"] == "hot"
 
 
+def test_workload_with_a_single_course():
+    students = [f"S{i:04d}" for i in range(1, 601)]
+    for dist in ("skewed", "uniform", "custom"):
+        cfg = {"course_count": 1, "distribution": dist, "hot_share": 0.7, "weights": [3],
+               "total_requests": 120, "seed": 3}
+        courses, workload = build_workload(cfg, students)
+        assert [(c["course_id"], c["requests"], c["label"]) for c in courses] == [("XP-1", 120, "single")]
+        assert len({w["student_id"] for w in workload}) == 120
+
+
+def test_experiment_config_accepts_one_course():
+    from app.schemas.api import ExperimentConfig
+
+    assert ExperimentConfig(course_count=1).course_count == 1
+    with pytest.raises(ValueError):
+        ExperimentConfig(course_count=0)
+
+
 def test_failure_injector_targets_one_request():
     inj = FailureInjector(enabled=True)
     inj.arm(FailureKind.BEFORE_COMMIT, request_id="r1", count=2)

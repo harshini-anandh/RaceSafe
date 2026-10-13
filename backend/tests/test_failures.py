@@ -129,6 +129,38 @@ def test_lost_response_then_safe_retry_over_http(db_settings):
         assert client.get("/api/consistency").json()["all_passed"]
 
 
+def test_manual_testing_knobs_over_http(db_settings):
+    """work_ms keeps the course lock; hold_ms keeps a cancellation open (both demo-only)."""
+    import threading
+    import time
+
+    from app.main import create_app
+    from app.services.demo_data import prepare_experiment_courses, reset_all_data
+
+    app = create_app(db_settings)
+    with TestClient(app) as client:
+        system = app.state.system
+        with system.engine.begin() as conn:
+            reset_all_data(conn)
+            prepare_experiment_courses(conn, [("T-KNOB", "Knobs", 1)])
+        for sid in ("S0001", "S0002"):
+            client.post("/api/registrations", json={"student_id": sid, "course_id": "T-KNOB"})
+
+        box = {}
+        t = threading.Thread(target=lambda: box.update(
+            r=client.post("/api/registrations/cancel?hold_ms=600", json={"student_id": "S0001", "course_id": "T-KNOB"})))
+        t.start()
+        time.sleep(0.15)
+        newcomer = client.post("/api/registrations", json={"student_id": "S0003", "course_id": "T-KNOB"}).json()
+        t.join()
+        assert box["r"].json()["promoted"]["student_id"] == "S0002"
+        assert newcomer["outcome"] == "WAITLISTED" and newcomer["waitlist_position"] == 1
+
+        t0 = time.perf_counter()
+        slow = client.post("/api/registrations?work_ms=300", json={"student_id": "S0004", "course_id": "T-KNOB"})
+        assert slow.json()["processing_ms"] >= 280 and time.perf_counter() - t0 >= 0.28
+
+
 def test_api_validation_and_errors(db_settings):
     from app.main import create_app
 

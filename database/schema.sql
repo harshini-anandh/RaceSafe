@@ -140,7 +140,7 @@ CREATE TABLE IF NOT EXISTS registration_events (
 CREATE TABLE IF NOT EXISTS experiments (
     experiment_id    BIGINT       NOT NULL AUTO_INCREMENT,
     group_id         CHAR(36)     NULL,
-    experiment_type  ENUM('FAIRQUEUE', 'RACE_UNSAFE', 'RACE_SAFE') NOT NULL,
+    experiment_type  ENUM('FAIRQUEUE', 'RACE_UNSAFE', 'RACE_SAFE', 'CHALLENGE') NOT NULL,
     scheduler_mode   VARCHAR(20)  NULL,
     run_index        INT          NOT NULL DEFAULT 1,
     status           ENUM('RUNNING', 'COMPLETED', 'FAILED') NOT NULL DEFAULT 'RUNNING',

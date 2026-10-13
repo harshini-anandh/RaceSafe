@@ -18,7 +18,7 @@ import time
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
-from app.core.clock import utcnow
+from app.core.clock import iso, utcnow
 from app.core.errors import NotFoundError
 from app.database.connection import RETRYABLE_ERRORS, mysql_error_code
 from app.models.enums import EventType
@@ -27,11 +27,17 @@ from app.services.events import write_event
 MAX_CANCEL_ATTEMPTS = 3
 
 
-def cancel_registration(engine, student_id: str, course_id: str) -> dict:
+def cancel_registration(engine, student_id: str, course_id: str, hold_ms: int = 0) -> dict:
+    """hold_ms (tests/challenges only): keep the course lock this long after the
+    DELETE, to force a concurrent registration to arrive inside the window."""
     for attempt in range(1, MAX_CANCEL_ATTEMPTS + 1):
         try:
+            started_at = utcnow()
             with engine.begin() as conn:
-                return _cancel_txn(conn, student_id, course_id)
+                result = _cancel_txn(conn, student_id, course_id, hold_ms)
+            result["started_at"] = iso(started_at)
+            result["committed_at"] = iso(utcnow())
+            return result
         except DBAPIError as exc:
             if mysql_error_code(exc) in RETRYABLE_ERRORS and attempt < MAX_CANCEL_ATTEMPTS:
                 time.sleep(0.02 * attempt)
@@ -40,13 +46,14 @@ def cancel_registration(engine, student_id: str, course_id: str) -> dict:
     raise RuntimeError("unreachable")
 
 
-def _cancel_txn(conn, student_id: str, course_id: str) -> dict:
+def _cancel_txn(conn, student_id: str, course_id: str, hold_ms: int = 0) -> dict:
     course = conn.execute(
         text("SELECT course_id, capacity, confirmed_count FROM courses WHERE course_id = :cid FOR UPDATE"),
         {"cid": course_id},
     ).mappings().first()
     if course is None:
         raise NotFoundError(f"Unknown course_id '{course_id}'")
+    lock_acquired_at = utcnow()
 
     reg = conn.execute(
         text(
@@ -64,6 +71,9 @@ def _cancel_txn(conn, student_id: str, course_id: str) -> dict:
                 course_id=course_id, created_at=now,
                 message=f"{student_id} cancelled a {reg['status']} registration",
                 metadata={"previous_status": reg["status"], "waitlist_seq": reg["waitlist_seq"]})
+
+    if hold_ms:
+        time.sleep(hold_ms / 1000.0)  # the seat is free right now, but the course row is still locked
 
     promoted = None
     if reg["status"] == "CONFIRMED":
@@ -108,4 +118,5 @@ def _cancel_txn(conn, student_id: str, course_id: str) -> dict:
         "promoted": promoted,
         "confirmed_count": confirmed_now,
         "capacity": course["capacity"],
+        "lock_acquired_at": iso(lock_acquired_at),
     }

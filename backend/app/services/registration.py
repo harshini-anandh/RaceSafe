@@ -13,6 +13,11 @@ One attempt = one transaction:
       INSERT events TRANSACTION_COMMITTED + REQUEST_<RESULT>
     COMMIT
 
+Waitlist fairness guard: if a seat is free while students are still on the
+waitlist (should never happen, because cancellation promotes atomically, but
+e.g. after a capacity increase), the head of the waitlist is promoted first,
+so a newcomer can never take a seat ahead of the stored FIFO waitlist.
+
 The lock order (request -> course -> registration) is the same everywhere,
 which prevents circular waits. Two requests for the same course queue up on
 the course row lock; requests for different courses do not block each other.
@@ -27,7 +32,7 @@ from dataclasses import dataclass
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
-from app.core.clock import ms_between, utcnow
+from app.core.clock import iso, ms_between, utcnow
 from app.database.connection import RETRYABLE_ERRORS, mysql_error_code
 from app.models.enums import RESULT_EVENT, EventType, RequestResult, RequestStatus
 from app.scheduler.fair_queue import Job
@@ -67,6 +72,12 @@ class RegistrationProcessor:
             metadata={"queue_wait_ms": round(queue_wait_ms or 0, 3), "scheduler_mode": self.scheduler.mode},
         )
         try:
+            # Demo hook: fail after dequeue (course slot already marked in progress), before BEGIN.
+            try:
+                self.injector.maybe_fail_after_dequeue(job.request_id, job.attempt)
+            except InjectedWorkerFailure as exc:
+                self._record_failure(job, worker, str(exc), kind="INJECTED_AFTER_DEQUEUE", in_transaction=False)
+                return
             with self.engine.connect() as conn:
                 with conn.begin():  # COMMIT on success, ROLLBACK on any exception
                     outcome = self._allocate_seat(conn, job, worker)
@@ -114,6 +125,8 @@ class RegistrationProcessor:
         ).mappings().first()
         if course is None:
             raise RuntimeError(f"Course {job.course_id} does not exist")
+        lock_acquired_at = utcnow()  # critical section for this course starts now
+        confirmed_count = course["confirmed_count"]
 
         # 3. lock (or find absence of) this student's registration for the course
         existing = conn.execute(
@@ -125,11 +138,16 @@ class RegistrationProcessor:
         ).mappings().first()
 
         now = utcnow()
-        metadata: dict = {"capacity": course["capacity"], "confirmed_before": course["confirmed_count"]}
+        metadata: dict = {"capacity": course["capacity"], "confirmed_before": confirmed_count}
+        if existing is None and confirmed_count < course["capacity"]:
+            promoted = self._promote_waitlist_heads(conn, job, worker, course["capacity"], confirmed_count, now)
+            if promoted:
+                confirmed_count += len(promoted)
+                metadata["promoted_before_newcomer"] = promoted
         if existing is not None:
             result = RequestResult.ALREADY_REGISTERED.value
             metadata["existing_status"] = existing["status"]
-        elif course["confirmed_count"] < course["capacity"]:
+        elif confirmed_count < course["capacity"]:
             conn.execute(
                 text(
                     "INSERT INTO registrations (student_id, course_id, status, request_id, created_at) "
@@ -184,20 +202,63 @@ class RegistrationProcessor:
         common = dict(request_id=job.request_id, student_id=job.student_id, course_id=job.course_id,
                       attempt=job.attempt, worker_name=worker, experiment_id=job.experiment_id)
         write_event(conn, EventType.TRANSACTION_COMMITTED, message=f"Committed on attempt {job.attempt}",
-                    metadata={"processing_ms": round(ms_between(job.dispatched_at, completed_at) or 0, 3)},
+                    metadata={"processing_ms": round(ms_between(job.dispatched_at, completed_at) or 0, 3),
+                              "dispatched_at": iso(job.dispatched_at),
+                              "lock_acquired_at": iso(lock_acquired_at),
+                              "lock_wait_ms": round(ms_between(job.dispatched_at, lock_acquired_at) or 0, 3),
+                              "critical_section_ms": round(ms_between(lock_acquired_at, completed_at) or 0, 3)},
                     created_at=completed_at, **common)
         write_event(conn, RESULT_EVENT[result], message=f"Result: {result}", metadata=metadata,
                     created_at=completed_at, **common)
         return AttemptOutcome(RequestStatus.COMPLETED.value, result)
 
+    def _promote_waitlist_heads(self, conn, job: Job, worker: str, capacity: int, confirmed: int, now) -> list:
+        """Free seat + non-empty waitlist: promote the FIFO head(s) before the newcomer."""
+        promoted = []
+        while confirmed < capacity:
+            head = conn.execute(
+                text(
+                    "SELECT registration_id, student_id, waitlist_seq, request_id FROM registrations "
+                    "WHERE course_id = :cid AND status = 'WAITLISTED' ORDER BY waitlist_seq LIMIT 1 FOR UPDATE"
+                ),
+                {"cid": job.course_id},
+            ).mappings().first()
+            if head is None:
+                break
+            conn.execute(
+                text("UPDATE registrations SET status = 'CONFIRMED', waitlist_seq = NULL, promoted_at = :now "
+                     "WHERE registration_id = :id"),
+                {"now": now, "id": head["registration_id"]},
+            )
+            conn.execute(text("UPDATE courses SET confirmed_count = confirmed_count + 1 WHERE course_id = :cid"),
+                         {"cid": job.course_id})
+            write_event(conn, EventType.WAITLIST_PROMOTED, request_id=head["request_id"],
+                        student_id=head["student_id"], course_id=job.course_id, worker_name=worker,
+                        experiment_id=job.experiment_id, created_at=now,
+                        message=f"Free seat found while {head['student_id']} was waiting: waitlist head "
+                                f"promoted before newcomer {job.student_id}",
+                        metadata={"waitlist_seq": head["waitlist_seq"], "newcomer": job.student_id})
+            promoted.append(head["student_id"])
+            confirmed += 1
+        return promoted
+
     # ------------------------------------------------------------------ failure path
-    def _record_failure(self, job: Job, worker: str, error: str, kind: str) -> None:
-        """The transaction has already been rolled back when we get here."""
+    def recover_unhandled(self, job: Job, worker: str, exc: BaseException) -> None:
+        """Called by the pool when an error escaped process(), e.g. the worker
+        thread crashed. MySQL has already rolled back the open transaction (the
+        `with conn.begin()` block exits on any exception). Requeue now, BEFORE
+        the pool releases the course slot."""
+        kind = "THREAD_CRASH" if not isinstance(exc, Exception) else "UNHANDLED"
+        self._record_failure(job, worker, f"{type(exc).__name__}: {exc}", kind=kind)
+
+    def _record_failure(self, job: Job, worker: str, error: str, kind: str, in_transaction: bool = True) -> None:
+        """The transaction (if any) has already been rolled back when we get here."""
         common = dict(request_id=job.request_id, student_id=job.student_id, course_id=job.course_id,
                       attempt=job.attempt, worker_name=worker, experiment_id=job.experiment_id)
         self.events.log(EventType.WORKER_FAILURE, message=error, metadata={"kind": kind}, **common)
         self.events.log(EventType.TRANSACTION_ROLLED_BACK,
-                        message="Rolled back: no registration, count or result was written", **common)
+                        message=("Rolled back: no registration, count or result was written" if in_transaction
+                                 else "No transaction was open yet; nothing to roll back"), **common)
         try:
             with self.engine.begin() as conn:
                 conn.execute(

@@ -53,6 +53,11 @@ const post = async (path, body, params) => (await send(path, { method: 'POST', b
 const put = async (path, body) => (await send(path, { method: 'PUT', body })).data;
 const del = async (path) => (await send(path, { method: 'DELETE' })).data;
 
+/** True when the problem is reaching the backend or its database (shown once, globally). */
+export function isConnectivityError(error) {
+  return !!error && (error.status === 0 || error.code === 'DATABASE_UNAVAILABLE');
+}
+
 export function newRequestId() {
   if (window.crypto && typeof window.crypto.randomUUID === 'function') return window.crypto.randomUUID();
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {

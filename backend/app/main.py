@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
-from app.api import routes_core, routes_demo, routes_monitoring, routes_registrations
+from app.api import routes_challenges, routes_core, routes_demo, routes_monitoring, routes_registrations
 from app.core.config import Settings
 from app.core.errors import RaceSafeError
 from app.system import RaceSafeSystem
@@ -76,7 +76,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def handle_pool_timeout(_: Request, exc: PoolTimeoutError):
         return JSONResponse(status_code=503, content={"code": "BUSY", "detail": "All database connections are busy"})
 
-    for module in (routes_core, routes_registrations, routes_monitoring, routes_demo):
+    for module in (routes_core, routes_registrations, routes_monitoring, routes_demo, routes_challenges):
         app.include_router(module.router, prefix="/api")
 
     @app.get("/", include_in_schema=False)

@@ -62,6 +62,8 @@ def allocate_counts(total: int, weights: list[float]) -> list[int]:
 def build_weights(config: dict) -> list[float]:
     n = config["course_count"]
     dist = config["distribution"]
+    if n == 1:
+        return [1.0]  # one course gets every request, whatever the distribution
     if dist == "uniform":
         return [1.0] * n
     if dist == "custom":
@@ -83,7 +85,10 @@ def build_workload(config: dict, students: list[str]) -> tuple[list[dict], list[
         course_id = f"XP-{index}"
         if count > len(students):
             raise RaceSafeError(f"{course_id} would need {count} distinct students, only {len(students)} exist")
-        label = "hot" if (config["distribution"] != "uniform" and w == max_w) else "normal"
+        if len(weights) == 1:
+            label = "single"
+        else:
+            label = "hot" if (config["distribution"] != "uniform" and w == max_w) else "normal"
         courses.append({"course_id": course_id, "name": f"Experiment course {index} ({label})",
                         "requests": count, "weight": round(w / sum(weights), 4), "label": label})
         for sid in rng.sample(students, count):
@@ -356,7 +361,8 @@ def summarize_run(engine, exp_id: int, released_at, courses: list[dict]) -> dict
             "window_ms": round(ms_between(released_at, window_end), 2) if window_end else None,
             "served_in_window": served,
             "definition": "Jain's index over requests dispatched per course while every course still "
-                          "had requests waiting (1.0 = equal service, 1/n = one course took all workers)",
+                          "had requests waiting (1.0 = equal service, 1/n = one course took all workers)"
+                          + ("" if len(served) > 1 else " - not defined for a single course"),
         },
         "per_course": course_rows,
     }

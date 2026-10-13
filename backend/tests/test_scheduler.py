@@ -5,7 +5,10 @@ import threading
 import time
 from collections import Counter
 
+import pytest
+
 from app.scheduler.fair_queue import Job, RequestScheduler
+from app.scheduler.simulation import simulate
 
 
 def job(course: str, n: int) -> Job:
@@ -177,3 +180,28 @@ def test_quiet_course_served_earlier_under_fairqueue_than_fifo():
         return max(i for i, rid in enumerate(order) if rid.startswith("QUIET"))
 
     assert last_quiet_position("FAIR_QUEUE") < last_quiet_position("GLOBAL_FIFO")
+
+
+# ---- KO-06-C3 logical-tick model: 100 A (10 ticks) then 1 B (1 tick), 8 workers
+C3_ARRIVALS = [("A", 10)] * 100 + [("B", 1)]
+
+
+@pytest.mark.parametrize("mode", ["GLOBAL_FIFO", "FAIR_QUEUE"])
+def test_c3_model_is_deterministic_and_seat_safe(mode):
+    first = simulate(mode, C3_ARRIVALS, workers=8, capacities={"A": 1, "B": 1})
+    second = simulate(mode, C3_ARRIVALS, workers=8, capacities={"A": 1, "B": 1})
+    assert first["per_course"] == second["per_course"] and first["timeline"] == second["timeline"]
+    assert first["makespan_ticks"] == 1000
+    assert (first["per_course"]["A"]["confirmed"], first["per_course"]["A"]["waitlisted"]) == (1, 99)
+    assert first["per_course"]["B"]["confirmed"] == 1
+
+
+def test_c3_model_head_of_line_blocking_without_universal_speedup():
+    fifo = simulate("GLOBAL_FIFO", C3_ARRIVALS, workers=8, capacities={"A": 1, "B": 1})
+    fair = simulate("FAIR_QUEUE", C3_ARRIVALS, workers=8, capacities={"A": 1, "B": 1})
+    assert fifo["per_course"]["B"]["avg_wait"] == 930  # B stuck behind A's backlog
+    assert fair["per_course"]["B"]["avg_wait"] == 0
+    assert fifo["per_course"]["A"]["avg_turnaround"] == fair["per_course"]["A"]["avg_turnaround"] == 505
+    assert fifo["active_slots"]["peak_busy_workers"] == 8 and fifo["active_slots"]["peak_blocked_on_lock"] == 7
+    assert fair["active_slots"]["peak_busy_workers"] == 2
+    assert fair["active_slots"]["peak_in_flight_by_course"] == {"A": 1, "B": 1}

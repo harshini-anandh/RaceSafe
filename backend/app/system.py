@@ -18,6 +18,7 @@ from sqlalchemy import text
 from app.core.clock import utcnow
 from app.core.config import Settings
 from app.database.connection import create_db_engine
+from app.database.setup import apply_upgrades
 from app.models.enums import EventType
 from app.scheduler.fair_queue import Job, RequestScheduler
 from app.services.completions import CompletionRegistry
@@ -25,8 +26,9 @@ from app.services.events import EventLogger, event_params, write_event, write_ev
 from app.services.experiments import ExperimentManager
 from app.services.intake import IntakeService
 from app.services.race_lab import RaceLab
+from app.services.challenges import ChallengeRunner
 from app.services.registration import RegistrationProcessor
-from app.workers.failure_injection import FailureInjector
+from app.workers.failure_injection import FailureInjector, FailureKind
 from app.workers.pool import WorkerPool
 
 logger = logging.getLogger("racesafe.system")
@@ -45,11 +47,13 @@ class RaceSafeSystem:
         )
         self.completions = CompletionRegistry()
         self.processor = RegistrationProcessor(self)
-        self.pool = WorkerPool(self.scheduler, self.processor.process, size=settings.worker_count)
+        self.pool = WorkerPool(self.scheduler, self.processor.process, size=settings.worker_count,
+                               on_unhandled=self.processor.recover_unhandled)
         self.intake = IntakeService(self)
         self.experiment_lock = threading.Lock()  # one experiment at a time (not a registration lock)
         self.experiments = ExperimentManager(self)
         self.race_lab = RaceLab(self)
+        self.challenges = ChallengeRunner(self)
         self.db_ready = False
         self.startup_error: str | None = None
         self.recovered_on_startup = 0
@@ -68,6 +72,9 @@ class RaceSafeSystem:
     def _startup_db(self) -> None:
         with self.engine.connect() as conn:
             conn.execute(text("SELECT 1 FROM registration_requests LIMIT 1"))
+        applied = apply_upgrades(self.settings)
+        if applied:
+            logger.info("Applied schema upgrades: %s", ", ".join(applied))
         self.recovered_on_startup = self.recover_pending(reason="Backend (re)started")
         self.db_ready = True
         self.startup_error = None
@@ -141,6 +148,21 @@ class RaceSafeSystem:
             self.events.log(EventType.RECOVERY_REQUEUED, request_id=request_id, student_id=student_id,
                             course_id=course_id, attempt=job.attempt, experiment_id=experiment_id,
                             message=reason)
+
+    def response_lost(self, request_id: str, outcome: dict) -> bool:
+        """Demo: should the reply for this finished request be dropped?
+
+        Used by the HTTP route and by the challenge runner, so both behave the
+        same: the result is already committed; only the reply is lost.
+        """
+        if not self.injector.consume(FailureKind.LOST_RESPONSE, request_id):
+            return False
+        self.events.log(
+            EventType.RESPONSE_LOST, request_id=request_id, student_id=outcome["student_id"],
+            course_id=outcome["course_id"], attempt=outcome["attempts"], experiment_id=outcome.get("experiment_id"),
+            message=f"Result {outcome['outcome']} was committed, but the reply was dropped (demo)",
+        )
+        return True
 
     def simulate_crash_and_restart(self) -> dict:
         """Demo: lose all in-memory queues (as in a crash), then run recovery.

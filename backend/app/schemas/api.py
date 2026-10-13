@@ -67,7 +67,7 @@ class SchedulerPauseUpdate(BaseModel):
 class ExperimentConfig(BaseModel):
     mode: Literal["GLOBAL_FIFO", "FAIR_QUEUE", "BOTH"] = "BOTH"
     total_requests: int = Field(500, ge=20, le=2000)
-    course_count: int = Field(5, ge=2, le=8)
+    course_count: int = Field(5, ge=1, le=8, description="1 = single course (no cross-course comparison)")
     distribution: Literal["skewed", "uniform", "custom"] = "skewed"
     hot_share: float = Field(0.7, ge=0.2, le=0.95, description="Share of requests for the hot course (skewed)")
     weights: Optional[list[float]] = Field(None, description="One weight per course (custom)")
@@ -100,9 +100,21 @@ class RaceLabConfig(BaseModel):
 
 # ---------------------------------------------------------------- failures / admin
 class FailureInjection(BaseModel):
-    kind: Literal["BEFORE_COMMIT", "LOST_RESPONSE"]
+    kind: Literal["AFTER_DEQUEUE", "BEFORE_COMMIT", "WORKER_CRASH", "LOST_RESPONSE"]
     request_id: Optional[str] = Field(None, description="Target one request; omit to hit the next N requests")
     count: int = Field(1, ge=1, le=10, description="How many times to fail")
+
+
+class ChallengeParams(BaseModel):
+    """Optional knobs; defaults follow the challenge sheet."""
+    scheduler_mode: Literal["GLOBAL_FIFO", "FAIR_QUEUE"] = Field(
+        "GLOBAL_FIFO", description="C1: GLOBAL_FIFO makes all 8 workers race for the same row lock")
+    students: int = Field(500, ge=20, le=600, description="C1: distinct students")
+    capacity: int = Field(10, ge=1, le=100, description="C1: course capacity")
+    include_real_run: bool = Field(True, description="C3: also run the workload against MySQL")
+    tick_ms: int = Field(3, ge=1, le=20, description="C3: milliseconds per logical tick in the MySQL run")
+    hold_ms: int = Field(400, ge=50, le=2000, description="C5: how long the forced interleavings hold the lock")
+    iterations: int = Field(20, ge=1, le=200, description="C5: free-running races to repeat")
 
 
 class ResetRequest(BaseModel):

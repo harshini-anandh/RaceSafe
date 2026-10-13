@@ -69,6 +69,7 @@ class RequestScheduler:
         self.dispatched_total = 0
         self.peak_in_flight = 0
         self.peak_courses_in_flight = 0
+        self.peak_in_flight_by_course: Counter[str] = Counter()
         self.record_dispatch_order = record_dispatch_order
         self.dispatch_order: list[tuple[str, str]] = []  # (request_id, course_id), tests only
 
@@ -154,6 +155,8 @@ class RequestScheduler:
         courses_in_flight = sum(1 for v in self._in_flight.values() if v > 0)
         self.peak_in_flight = max(self.peak_in_flight, in_flight_total)
         self.peak_courses_in_flight = max(self.peak_courses_in_flight, courses_in_flight)
+        self.peak_in_flight_by_course[job.course_id] = max(self.peak_in_flight_by_course[job.course_id],
+                                                           self._in_flight[job.course_id])
         if self.record_dispatch_order:
             self.dispatch_order.append((job.request_id, job.course_id))
         return job
@@ -246,6 +249,7 @@ class RequestScheduler:
             self.dispatched_total = 0
             self.peak_in_flight = 0
             self.peak_courses_in_flight = 0
+            self.peak_in_flight_by_course = Counter()
             self.dispatch_order = []
 
     def snapshot(self) -> dict:
@@ -266,4 +270,5 @@ class RequestScheduler:
                 "dispatched_total": self.dispatched_total,
                 "peak_in_flight": self.peak_in_flight,
                 "peak_courses_in_flight": self.peak_courses_in_flight,
+                "peak_in_flight_by_course": dict(self.peak_in_flight_by_course),
             }

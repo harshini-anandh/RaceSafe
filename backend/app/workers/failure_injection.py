@@ -1,7 +1,14 @@
 """Controlled failure injection (development/demo mode only).
 
+AFTER_DEQUEUE  the worker fails right after taking the request from the
+               scheduler (its course slot is already marked in progress),
+               before any transaction is opened.
 BEFORE_COMMIT  the worker raises an error after doing its writes but before
                COMMIT, so MySQL rolls the transaction back.
+WORKER_CRASH   the worker THREAD dies while holding the course row lock and
+               the scheduler slot (raised as a BaseException, so ordinary
+               `except Exception` handlers do not catch it). The pool must roll
+               back, requeue, release the slot and restart the worker.
 LOST_RESPONSE  the transaction commits normally, but the API drops the HTTP
                response, as if the network failed on the way back.
 
@@ -18,12 +25,18 @@ from app.core.errors import DemoOnlyError
 
 
 class FailureKind(str, Enum):
+    AFTER_DEQUEUE = "AFTER_DEQUEUE"
     BEFORE_COMMIT = "BEFORE_COMMIT"
+    WORKER_CRASH = "WORKER_CRASH"
     LOST_RESPONSE = "LOST_RESPONSE"
 
 
 class InjectedWorkerFailure(RuntimeError):
-    """Raised inside a transaction to simulate a worker crashing before commit."""
+    """Raised to simulate a worker failing (handled inside the processor)."""
+
+
+class WorkerThreadCrash(BaseException):
+    """Simulates the worker thread itself dying (escapes `except Exception`)."""
 
 
 class FailureInjector:
@@ -59,7 +72,15 @@ class FailureInjector:
                 return True
             return False
 
+    def maybe_fail_after_dequeue(self, request_id: str, attempt: int) -> None:
+        if self.consume(FailureKind.AFTER_DEQUEUE, request_id):
+            raise InjectedWorkerFailure(
+                f"Injected worker failure after dequeue, before BEGIN (attempt {attempt})")
+
     def maybe_fail_before_commit(self, request_id: str, attempt: int) -> None:
+        if self.consume(FailureKind.WORKER_CRASH, request_id):
+            raise WorkerThreadCrash(
+                f"Injected worker THREAD crash while holding the course lock (attempt {attempt})")
         if self.consume(FailureKind.BEFORE_COMMIT, request_id):
             raise InjectedWorkerFailure(f"Injected worker failure before COMMIT (attempt {attempt})")
 
